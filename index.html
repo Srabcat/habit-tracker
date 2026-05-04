@@ -599,9 +599,11 @@
     if (!cfg.sheetId){
       try {
         const { id, url } = await createSheet(tr.access_token);
-        await initSheetHeaders(tr.access_token, id);
+        // Save Sheet ID FIRST so a later failure can't orphan the Sheet
         setConfig({ sheetId: id, sheetUrl: url });
-      } catch(e){ console.error('sheet init failed', e); }
+        try { await initSheetHeaders(tr.access_token, id); }
+        catch(e){ console.error('header init failed (Sheet still saved):', e); }
+      } catch(e){ console.error('sheet creation failed', e); }
     }
     window.location.reload();
   }
@@ -1442,15 +1444,17 @@
     $('sheet-link').textContent = 'creating Sheet…';
     try {
       const { id, url } = await createSheet(cfg.accessToken);
-      await initSheetHeaders(cfg.accessToken, id);
+      // Save Sheet ID FIRST so a later failure can't orphan the Sheet
       setConfig({ sheetId: id, sheetUrl: url });
       $('sheet-link').href = url;
       $('sheet-link').textContent = 'Google Sheet';
+      try { await initSheetHeaders(cfg.accessToken, id); }
+      catch(e){ console.error('header init failed (Sheet still saved):', e); }
     } catch(e){
       console.error('sheet creation failed', e);
       $('sheet-link').style.display = 'none';
       $('sheet-link-pending').style.display = 'inline';
-      $('sheet-link-pending').textContent = 'Google Sheets (sign out and back in to retry)';
+      $('sheet-link-pending').textContent = 'Google Sheets (error — see console; check OAuth scopes)';
     }
   }
 
