@@ -389,7 +389,7 @@
     <div>
       <div class="h-name" id="h1-name">H1 · MIT</div>
       <div class="h-default-sub">Did you hit today's MIT? Click the box at end of day if yes.</div>
-      <div class="h-reminder"><span class="h-reminder-icon">★</span><input class="h-reminder-input" id="h1-reminder" placeholder="(optional reminder — what makes you actually pick the right MIT?)"></div>
+      <div class="h-reminder"><span class="h-reminder-icon">★</span><span class="h-reminder-input" id="h1-reminder" style="display:inline-block; min-height:1.2em; color:#64748b;"></span></div>
     </div>
     <div class="h-streak"><div class="h-streak-num" id="streak-h1">0</div><div class="h-streak-best">best <span id="best-h1-row">0</span></div></div>
   </div>
@@ -399,7 +399,7 @@
     <div>
       <div class="h-name" id="h2-name">H2 · Pomodoro</div>
       <div class="h-default-sub">Did you do a focused work block + a recharge break? Toggle the two boxes below — H2 auto-checks when both are marked.</div>
-      <div class="h-reminder"><span class="h-reminder-icon">★</span><input class="h-reminder-input" id="h2-reminder" placeholder="(optional reminder — phone away? music?)"></div>
+      <div class="h-reminder"><span class="h-reminder-icon">★</span><span class="h-reminder-input" id="h2-reminder" style="display:inline-block; min-height:1.2em; color:#64748b;"></span></div>
     </div>
     <div class="h-streak"><div class="h-streak-num" id="streak-h2">0</div><div class="h-streak-best">best <span id="best-h2-row">0</span></div></div>
   </div>
@@ -417,10 +417,8 @@
         <button class="chip" data-chip="E" title="Exercise">E</button>
         <button class="chip" data-chip="M" title="Meditate">M</button>
         <span class="target-control">
-          <button class="target-btn" id="tgt-down">−</button>
           <span class="target-num" id="tgt-num">1</span>
-          <button class="target-btn" id="tgt-up">+</button>
-          <span class="target-lab">target</span>
+          <span class="target-lab">target (edit in Sheet config)</span>
         </span>
       </div>
     </div>
@@ -431,7 +429,7 @@
     <div>
       <div class="h-name" id="h3-name">H3 · Reflect</div>
       <div class="h-default-sub">Did you close the laptop at 9pm and write a reflection? Click the box when done.</div>
-      <div class="h-reminder"><span class="h-reminder-icon">★</span><input class="h-reminder-input" id="h3-reminder" placeholder="(optional reminder — what makes you actually shut down?)"></div>
+      <div class="h-reminder"><span class="h-reminder-icon">★</span><span class="h-reminder-input" id="h3-reminder" style="display:inline-block; min-height:1.2em; color:#64748b;"></span></div>
     </div>
     <div class="h-streak"><div class="h-streak-num" id="streak-h3">0</div><div class="h-streak-best">best <span id="best-h3-row">0</span></div></div>
   </div>
@@ -468,7 +466,7 @@
   <div class="tag-row">
     <span class="tag-row-label">Tag this day:</span>
     <span id="tag-chips"></span>
-    <button class="tag tag-add" id="tag-add-btn">+ new tag</button>
+    <a id="tag-edit-link" href="#" target="_blank" rel="noopener" style="font-size:11px; color:#94a3b8; text-decoration:underline; margin-left:4px;">edit tags in Sheet ↗</a>
   </div>
 </div>
 
@@ -561,6 +559,7 @@
   <button id="import-btn">Import backup</button>·
   <button id="sync-now-btn">Sync now</button>·
   <button id="reset-btn">Clear local cache</button>·
+  <button id="delete-cloud-btn" style="color:#dc2626;">Delete cloud data</button>·
   <button id="signout-btn">Sign out</button>
   <div class="last-export">Last backup: <span id="last-backup-meta">never</span></div>
   <div id="sync-status" style="font-size:11px; margin-top:4px; color:#94a3b8;">not signed in</div>
@@ -753,6 +752,9 @@
     habit1_name: 'MIT (most important task)',
     habit2_name: 'Deep Work + Recharge',
     habit3_name: 'Shutdown Reflect',
+    h1_reminder: '',
+    h2_reminder: '',
+    h3_reminder: '',
     recharge_codes: 'J,F,E,M',
     recharge_labels: 'Journal,Friend,Exercise,Meditate',
     recharge_target: '1',
@@ -1473,8 +1475,12 @@
     $('h2-display').classList.toggle('checked', dn.habit2);
     $('h3-cb').classList.toggle('checked', dn.habit3);
 
+    // Reminders are now read-only, sourced from Sheet config (h1_reminder etc)
     ['h1-reminder','h2-reminder','h3-reminder'].forEach((id, i) => {
-      const el = $(id); if (document.activeElement !== el) el.value = state.habitReminders['habit'+(i+1)] || '';
+      const el = $(id); if (!el) return;
+      const txt = appConfig['h'+(i+1)+'_reminder'] || '';
+      el.textContent = txt || '(optional reminder — set in Sheet config)';
+      el.style.color = txt ? '#475569' : '#cbd5e1';
     });
 
     $('dw-cb').classList.toggle('checked', !!today.deepWork);
@@ -1482,8 +1488,11 @@
       document.querySelector(`.chip[data-chip="${k}"]`).classList.toggle('done', !!(today.recharge && today.recharge[k]));
     });
     $('recharge-cnt').textContent = rechargeCount(today);
-    $('recharge-tgt-disp').textContent = today.rechargeTarget || 1;
-    $('tgt-num').textContent = today.rechargeTarget || 1;
+    // Recharge target is now Sheet-driven; falls back to today.rechargeTarget for legacy
+    const cfgTarget = parseInt(appConfig.recharge_target, 10);
+    const tgt = (Number.isFinite(cfgTarget) && cfgTarget > 0) ? cfgTarget : (today.rechargeTarget || 1);
+    $('recharge-tgt-disp').textContent = tgt;
+    $('tgt-num').textContent = tgt;
   }
 
   function renderHistory(){
@@ -1681,9 +1690,8 @@
   $('h3-cb').addEventListener('click', () => { today.shutdownReflect = !today.shutdownReflect; saveState(); render(); syncDayToSheets(todayStr()); });
   $('dw-cb').addEventListener('click', () => { today.deepWork = !today.deepWork; saveState(); render(); syncDayToSheets(todayStr()); });
 
-  ['h1-reminder','h2-reminder','h3-reminder'].forEach((id, i) => {
-    $(id).addEventListener('input', e => { state.habitReminders['habit'+(i+1)] = e.target.value; saveState(); });
-  });
+  // Reminders are read-only (config-driven from Sheet) — no input handler.
+  // Recharge target is read-only (config-driven from Sheet) — no +/- handler.
 
   document.querySelectorAll('.chip[data-chip]').forEach(chip => {
     chip.addEventListener('click', () => {
@@ -1693,8 +1701,6 @@
       saveState(); render(); syncDayToSheets(todayStr());
     });
   });
-  $('tgt-up').addEventListener('click', () => { state.rechargeTarget = Math.min(4,(state.rechargeTarget||1)+1); today.rechargeTarget = state.rechargeTarget; saveState(); render(); });
-  $('tgt-down').addEventListener('click', () => { state.rechargeTarget = Math.max(1,(state.rechargeTarget||1)-1); today.rechargeTarget = state.rechargeTarget; saveState(); render(); });
 
   $('emp-toggle').addEventListener('click', () => {
     const o = state.outcomes.employerRelease; o.done = !o.done; o.doneDate = o.done ? new Date().toISOString() : null;
@@ -1738,15 +1744,7 @@
     });
   });
 
-  $('tag-add-btn').addEventListener('click', () => {
-    const t = prompt('New tag name:'); if (!t) return;
-    const trimmed = t.trim().toLowerCase();
-    if (!trimmed || state.tags.includes(trimmed)) return;
-    state.tags.push(trimmed);
-    if (!today.reflectionTags) today.reflectionTags = [];
-    today.reflectionTags.push(trimmed);
-    saveState(); render();
-  });
+  // Tag list is config-driven; user edits Sheet's config_lists tab to add/remove tags.
 
   $('may-title-input').addEventListener('input', e => { state.goals.mayStarTitle = e.target.value; saveState(); });
   // Per-key debounced sync for goals tab (each key has its own timer)
@@ -1816,9 +1814,27 @@
     reader.readAsText(file);
   });
   $('reset-btn').addEventListener('click', () => {
-    if (!confirm('Reset everything? Cannot be undone.')) return;
+    if (!confirm('Clear local cache? Your Google Sheet data is preserved — next reload will re-hydrate from it.')) return;
     localStorage.removeItem(STORAGE_KEY);
     state = loadState(); ensureFriendNames(); today = getDay(todayStr()); render();
+  });
+
+  $('delete-cloud-btn').addEventListener('click', async () => {
+    const cfg = getConfig();
+    if (!cfg.sheetId || !cfg.accessToken){ alert('No Sheet connected.'); return; }
+    if (!confirm('Move your Habit Tracker Sheet to Trash? You can restore from Drive trash within 30 days.')) return;
+    if (!confirm('Final confirmation — move your Sheet to Trash? This will also clear local cache and sign you out.')) return;
+    try {
+      await fetch(`https://www.googleapis.com/drive/v3/files/${cfg.sheetId}`, {
+        method: 'PATCH',
+        headers: { Authorization: 'Bearer ' + cfg.accessToken, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ trashed: true })
+      });
+    } catch(e){ console.error('Delete cloud failed', e); }
+    localStorage.removeItem(STORAGE_KEY);
+    localStorage.removeItem(AUTH_EXP_KEY);
+    localStorage.removeItem(CONFIG_KEY);
+    window.location.reload();
   });
 
   $('signout-btn').addEventListener('click', () => {
@@ -1842,6 +1858,8 @@
     const cfg = getConfig();
     if (cfg.sheetUrl && cfg.sheetId) {
       $('sheet-link').href = cfg.sheetUrl;
+      const tagLink = $('tag-edit-link');
+      if (tagLink) tagLink.href = cfg.sheetUrl;
       return;
     }
     if (!cfg.accessToken || Date.now() > (cfg.accessTokenExp||0)){
