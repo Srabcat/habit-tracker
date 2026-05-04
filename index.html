@@ -1400,16 +1400,39 @@
     render();
   }, 60000);
 
-  if (checkAuth()) {
-    render();
-    // Show Sheet link if configured, else show pending placeholder
+  async function ensureSheetExists(){
     const cfg = getConfig();
-    if (cfg.sheetUrl) {
+    if (cfg.sheetUrl && cfg.sheetId) {
       $('sheet-link').href = cfg.sheetUrl;
-    } else {
+      return;
+    }
+    if (!cfg.accessToken || Date.now() > (cfg.accessTokenExp||0)){
+      // No valid token — request one, callback will create the sheet
       $('sheet-link').style.display = 'none';
       $('sheet-link-pending').style.display = 'inline';
+      const tc = getTokenClient();
+      if (tc) tc.requestAccessToken({ prompt: '' });
+      return;
     }
+    // Have token but no sheet — create it now
+    $('sheet-link').textContent = 'creating Sheet…';
+    try {
+      const { id, url } = await createSheet(cfg.accessToken);
+      await initSheetHeaders(cfg.accessToken, id);
+      setConfig({ sheetId: id, sheetUrl: url });
+      $('sheet-link').href = url;
+      $('sheet-link').textContent = 'Google Sheet';
+    } catch(e){
+      console.error('sheet creation failed', e);
+      $('sheet-link').style.display = 'none';
+      $('sheet-link-pending').style.display = 'inline';
+      $('sheet-link-pending').textContent = 'Google Sheets (sign out and back in to retry)';
+    }
+  }
+
+  if (checkAuth()) {
+    render();
+    ensureSheetExists();
     // Silently sync yesterday if it was missed
     const yd = daysAgoStr(1);
     if (state.days[yd] && !state.sheetsSynced[yd]) syncDayToSheets(yd);
