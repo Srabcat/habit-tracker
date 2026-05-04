@@ -269,7 +269,7 @@
 
 <div class="header">
   <div class="brand">Positive · Sustain · Energy</div>
-  <div class="header-right"><span id="today-date"></span> · <b id="day-count">Day 1</b></div>
+  <div class="header-right"><span id="today-date"></span> · <span id="since-days">Since 1d</span> · <span id="best-streak-hdr">Streak 0d</span></div>
 </div>
 
 <div class="nudge" id="nudge"></div>
@@ -632,7 +632,8 @@
   // ── Sheets API helpers ───────────────────────────────────────────────────────
   const SHEET_HEADERS = ['date','habit1_done','habit2_done','habit3_done','perfect_day',
     'deep_work','recharge_j','recharge_f','recharge_e','recharge_m','recharge_count',
-    'mit_text','reflection','tags','friend_count','energy_rating','synced_at'];
+    'mit_text','reflection','tags','friend_count','energy_rating','synced_at',
+    'start_date','best_streak'];
 
   async function sheetsReq(path, method, body, token){
     const res = await fetch('https://sheets.googleapis.com/v4' + path, {
@@ -918,7 +919,8 @@
       !!(day.recharge?.J), !!(day.recharge?.F), !!(day.recharge?.E), !!(day.recharge?.M),
       rechargeCount(day),
       day.mit||'', day.reflection||'', (day.reflectionTags||[]).join(', '),
-      friendCount, lastEnergy, new Date().toISOString()
+      friendCount, lastEnergy, new Date().toISOString(),
+      state.startDate, state.bestStreaks.perfect
     ];
     setSyncStatus('syncing');
     try {
@@ -942,7 +944,8 @@
     $('today-date').textContent = fmtDate(new Date());
     const start = new Date(state.startDate); start.setHours(0,0,0,0);
     const tNow = new Date(); tNow.setHours(0,0,0,0);
-    $('day-count').textContent = `Day ${Math.floor((tNow - start) / 86400000) + 1}`;
+    $('since-days').textContent = `Since ${Math.floor((tNow - start) / 86400000) + 1}d`;
+    $('best-streak-hdr').textContent = `Streak ${state.bestStreaks.perfect}d`;
     const h = new Date().getHours(), nudge = $('nudge');
     let txt = '', cls = '';
     if (h < 12) txt = 'Morning. Set your MIT to start the day.';
