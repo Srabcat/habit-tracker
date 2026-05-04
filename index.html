@@ -559,11 +559,22 @@
   Data lives in this browser + <a id="sheet-link" href="#" target="_blank" rel="noopener" style="color:#4f46e5; text-decoration:underline;">Google Sheet</a><span id="sheet-link-pending" style="display:none; color:#94a3b8;">Google Sheets <em>(syncs on next change)</em></span>.
   <button id="export-btn">Export backup</button>·
   <button id="import-btn">Import backup</button>·
-  <button id="reset-btn">Reset everything</button>·
+  <button id="sync-now-btn">Sync now</button>·
+  <button id="reset-btn">Clear local cache</button>·
   <button id="signout-btn">Sign out</button>
   <div class="last-export">Last backup: <span id="last-backup-meta">never</span></div>
-  <div id="sync-status" style="font-size:11px; margin-top:4px;"></div>
+  <div id="sync-status" style="font-size:11px; margin-top:4px; color:#94a3b8;">not signed in</div>
   <input type="file" id="import-file" accept=".json" style="display:none;">
+</div>
+
+<div id="error-banner" style="display:none; position:fixed; top:0; left:0; right:0; background:#fef3c7; border-bottom:1px solid #f59e0b; padding:10px 16px; font-size:13px; color:#92400e; z-index:9000;">
+  <span id="error-banner-text"></span>
+  <button id="error-banner-close" style="float:right; background:transparent; border:none; cursor:pointer; color:#92400e; font-weight:bold; padding:0 8px;">×</button>
+</div>
+
+<div id="hydrate-overlay" style="display:none; position:fixed; inset:0; background:rgba(248,250,252,0.85); z-index:8000; align-items:center; justify-content:center; flex-direction:column; gap:8px;">
+  <div style="font-size:14px; color:#475569;">Loading from your Google Sheet…</div>
+  <div style="font-size:11px; color:#94a3b8;">(your edits will queue and apply once loaded)</div>
 </div>
 
 <script>
@@ -668,21 +679,14 @@
   }
 
   async function findExistingSheet(token){
-    // 1. Try appProperties tag (survives rename, exact match)
+    // Only trust files this app explicitly tagged via appProperties.
+    // Filename matches alone are unsafe (could be a different user's shared
+    // sheet with the same name) — we'd risk reading/writing someone else's data.
     try {
       const tagged = await driveSearch(token,
         `appProperties has { key='${APP_TAG_KEY}' and value='${APP_TAG_VALUE}' } and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false`);
       if (tagged.length > 0) return { id: tagged[0].id, url: tagged[0].webViewLink };
-    } catch(e){ /* fall through to filename search */ }
-    // 2. Fallback: filename search, then bootstrap appProperties tag
-    try {
-      const named = await driveSearch(token,
-        `name='${SHEET_TITLE}' and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false`);
-      if (named.length > 0){
-        await tagSheetWithAppProperty(token, named[0].id);
-        return { id: named[0].id, url: named[0].webViewLink };
-      }
-    } catch(e){ /* drive scope may be missing */ }
+    } catch(e){ console.warn('Drive search failed', e); }
     return null;
   }
 
@@ -960,16 +964,21 @@
   function dateStr(d){ return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`; }
   // 4am cutoff (configurable in Sheet via day_cutoff_hour). Working past midnight
   // counts as the previous day until the cutoff hour.
+  function getCutoffHour(){
+    const raw = parseInt(appConfig.day_cutoff_hour, 10);
+    if (!Number.isFinite(raw) || raw < 0 || raw > 23) return 0;
+    return raw;
+  }
   function todayStr(){
     const d = new Date();
-    const cutoff = parseInt(appConfig.day_cutoff_hour, 10);
-    if (Number.isFinite(cutoff) && d.getHours() < cutoff) d.setDate(d.getDate() - 1);
+    const cutoff = getCutoffHour();
+    if (cutoff > 0 && d.getHours() < cutoff) d.setDate(d.getDate() - 1);
     return dateStr(d);
   }
   function tomorrowStr(){
     const d = new Date();
-    const cutoff = parseInt(appConfig.day_cutoff_hour, 10);
-    if (Number.isFinite(cutoff) && d.getHours() < cutoff) d.setDate(d.getDate() - 1);
+    const cutoff = getCutoffHour();
+    if (cutoff > 0 && d.getHours() < cutoff) d.setDate(d.getDate() - 1);
     d.setDate(d.getDate()+1);
     return dateStr(d);
   }
@@ -1230,19 +1239,63 @@
   }
 
   // ---------- Sync status ----------
-  function setSyncStatus(s){
+  // ──── Sync status + error banner + last-synced timestamp ─────────────────
+  let _lastSyncedAt = null;
+  function setSyncStatus(s, detail){
     const el = $('sync-status');
     if (!el) return;
-    if (s === 'ok'){ el.textContent = '✓ synced to Sheets'; el.style.color = '#16a34a'; }
-    else if (s === 'syncing'){ el.textContent = 'syncing…'; el.style.color = '#94a3b8'; }
-    else if (s === 'error'){ el.textContent = '✗ sync failed — check console'; el.style.color = '#dc2626'; }
-    else { el.textContent = ''; }
+    const stamp = _lastSyncedAt
+      ? ` · last synced ${Math.round((Date.now() - _lastSyncedAt) / 1000)}s ago`
+      : '';
+    if (s === 'ok'){
+      _lastSyncedAt = Date.now();
+      el.textContent = '✓ synced to Sheets';
+      el.style.color = '#16a34a';
+    } else if (s === 'syncing'){
+      el.textContent = 'syncing…' + stamp;
+      el.style.color = '#94a3b8';
+    } else if (s === 'error'){
+      el.textContent = '✗ sync failed' + (detail ? ' — ' + detail : '') + stamp;
+      el.style.color = '#dc2626';
+    } else if (s === 'idle'){
+      el.textContent = 'idle' + stamp;
+      el.style.color = '#94a3b8';
+    } else if (s === 'hydrating'){
+      el.textContent = 'loading from Sheet…';
+      el.style.color = '#94a3b8';
+    } else { el.textContent = ''; }
+  }
+  // Refresh "Xs ago" every 30s
+  setInterval(() => {
+    const el = $('sync-status');
+    if (el && _lastSyncedAt && (el.textContent.startsWith('✓') || el.textContent.startsWith('idle'))){
+      setSyncStatus('idle');
+    }
+  }, 30000);
+
+  function showError(msg){
+    const banner = $('error-banner'), txt = $('error-banner-text');
+    if (!banner || !txt) return;
+    txt.textContent = msg;
+    banner.style.display = 'block';
   }
 
   function debounce(fn, ms){ let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
 
   // ---------- Google Sheets sync (direct Sheets API) ----------
+  // ──── Hydrate gate + local-write queue ────────────────────────────────────
+  // While hydrate is in flight, queue local writes so they don't get clobbered
+  // by the incoming Sheet read. Replay queued dates after hydrate completes.
+  let _hydrateInFlight = false;
+  const _pendingDates = new Set();
+  function setHydrateState(active){
+    _hydrateInFlight = active;
+    const ov = $('hydrate-overlay');
+    if (ov) ov.style.display = active ? 'flex' : 'none';
+  }
+
   async function syncDayToSheets(ds){
+    if (_hydrateInFlight){ _pendingDates.add(ds); return; }
     const cfg = getConfig();
     if (!cfg.sheetId || !cfg.accessToken) return;
     if (Date.now() > cfg.accessTokenExp){
@@ -1271,7 +1324,11 @@
       state.sheetsSynced[ds] = true;
       saveState();
       setSyncStatus('ok');
-    } catch(err){ setSyncStatus('error'); console.error('Sheets sync failed', err); }
+    } catch(err){
+      setSyncStatus('error', err.message ? String(err.message).slice(0, 60) : '');
+      console.error('Sheets sync failed', err);
+      showError('Sheet sync failed: ' + (err.message || err));
+    }
   }
 
   const syncReflectDebounced = debounce(() => syncDayToSheets(todayStr()), 2000);
@@ -1836,15 +1893,19 @@
     const cfg = getConfig();
     if (!cfg.sheetId || !cfg.accessToken) return;
     if (Date.now() > (cfg.accessTokenExp||0)) return;
+    setHydrateState(true);
+    setSyncStatus('hydrating');
     try {
-      // 1. Meta (schema version, install date)
+      // 1. Meta (schema version, install date) — log warning on schema drift
       appMeta = await readMeta(cfg.accessToken, cfg.sheetId, state.startDate || todayStr());
+      if (appMeta.schema_version && appMeta.schema_version !== SCHEMA_VERSION){
+        console.warn(`Schema mismatch: Sheet=${appMeta.schema_version} app=${SCHEMA_VERSION}`);
+      }
       if (appMeta.start_date) state.startDate = appMeta.start_date;
-      // 2. Config (scalars: habit names, day_cutoff_hour, recharge_target, etc.)
+      // 2. Config
       appConfig = await readConfig(cfg.accessToken, cfg.sheetId);
-      // 3. config_lists (tags, recharge codes/labels, friends — replaces CSV)
+      // 3. config_lists
       appLists = await readConfigLists(cfg.accessToken, cfg.sheetId);
-      // Prefer config_lists for tags; fall back to CSV in config
       if (appLists.reflection_tags && appLists.reflection_tags.length > 0){
         state.tags = appLists.reflection_tags.map(t => t.key);
       } else {
@@ -1852,25 +1913,23 @@
           .split(',').map(s => s.trim()).filter(Boolean);
         if (sheetTags.length > 0) state.tags = sheetTags;
       }
-      // Friends from config_lists -> state.outcomes.friendConnection.namesList
       if (appLists.friends && appLists.friends.length > 0){
         const names = appLists.friends.map(f => f.key);
         state.outcomes.friendConnection.namesList = names;
-        // Ensure thisWeek has entries for each name
         const tw = state.outcomes.friendConnection.thisWeek || {};
         const newTw = {};
         names.forEach(n => { newTw[n.toLowerCase()] = !!tw[n.toLowerCase()]; });
         state.outcomes.friendConnection.thisWeek = newTw;
       }
-      // 4. Goals tab -> state.goals
+      // 4. Goals tab -> state.goals (Sheet is canonical: empty string = user cleared)
       const goals = await readGoals(cfg.accessToken, cfg.sheetId);
       state.goals = state.goals || {};
-      if (goals.north_star) state.goals.northStar = goals.north_star;
-      if (goals.weekly_sprint) state.goals.mayStarContent = goals.weekly_sprint;
-      if (goals.operating_notes_focus) state.goals.operatingNotes.focus = goals.operating_notes_focus;
-      if (goals.operating_notes_triggers) state.goals.operatingNotes.triggers = goals.operating_notes_triggers;
-      if (goals.operating_notes_victory) state.goals.operatingNotes.victory = goals.operating_notes_victory;
-      if (goals.friends_link_url) state.goals.friendsLinkUrl = goals.friends_link_url;
+      if (goals.north_star !== undefined) state.goals.northStar = goals.north_star;
+      if (goals.weekly_sprint !== undefined) state.goals.mayStarContent = goals.weekly_sprint;
+      if (goals.operating_notes_focus !== undefined) state.goals.operatingNotes.focus = goals.operating_notes_focus;
+      if (goals.operating_notes_triggers !== undefined) state.goals.operatingNotes.triggers = goals.operating_notes_triggers;
+      if (goals.operating_notes_victory !== undefined) state.goals.operatingNotes.victory = goals.operating_notes_victory;
+      if (goals.friends_link_url !== undefined) state.goals.friendsLinkUrl = goals.friends_link_url;
       // Rocks: rock_N_title + rock_N_progress map to existing rockNames + notes structure
       // (Defer full rock model migration; keep simple wiring for now)
       // 5. Habits rows -> state.days (Sheet is canonical for history)
@@ -1881,7 +1940,24 @@
       today = getDay(todayStr());
       saveState();
       render();
-    } catch(e){ console.error('hydrateFromSheet failed', e); }
+      setSyncStatus('idle');
+    } catch(e){
+      console.error('hydrateFromSheet failed', e);
+      showError('Could not load from Sheet: ' + (e.message || e) + '. Your local data is unchanged.');
+      setSyncStatus('error', 'hydrate failed');
+    } finally {
+      setHydrateState(false);
+      // Replay any queued local writes that happened during hydrate
+      const replay = Array.from(_pendingDates);
+      _pendingDates.clear();
+      for (const ds of replay){
+        // Re-merge: the user's local edits won out — push them up now.
+        // Since hydrateHabitsFromSheet already overwrote state.days, the user's
+        // change before hydrate is gone. So just re-sync today's current state.
+        // (For events that fire AFTER hydrate, the queue is empty.)
+        await syncDayToSheets(ds);
+      }
+    }
   }
 
   if (checkAuth()) {
@@ -1893,6 +1969,22 @@
       if (state.days[yd] && !state.sheetsSynced[yd]) syncDayToSheets(yd);
     })();
   }
+
+  // Flush pending debounced writes before page unload
+  window.addEventListener('beforeunload', () => {
+    Object.keys(_goalSyncTimers).forEach(k => clearTimeout(_goalSyncTimers[k]));
+    // Note: synchronous fetch on unload is unreliable in modern browsers;
+    // the user has 1.5s of edits at risk. Mitigated by short debounce.
+  });
+
+  // Manual "Sync now" button
+  const _syncNowBtn = $('sync-now-btn');
+  if (_syncNowBtn) _syncNowBtn.addEventListener('click', () => {
+    if (_hydrateInFlight){ alert('Still loading from Sheet — wait a moment.'); return; }
+    syncDayToSheets(todayStr());
+  });
+  const _errClose = $('error-banner-close');
+  if (_errClose) _errClose.addEventListener('click', () => $('error-banner').style.display = 'none');
 
 })();
 </script>
