@@ -387,7 +387,7 @@
   <div class="habit-row">
     <span class="h-cb" id="h1-cb" data-habit="habit1"></span>
     <div>
-      <div class="h-name">H1 · MIT</div>
+      <div class="h-name" id="h1-name">H1 · MIT</div>
       <div class="h-default-sub">Did you hit today's MIT? Click the box at end of day if yes.</div>
       <div class="h-reminder"><span class="h-reminder-icon">★</span><input class="h-reminder-input" id="h1-reminder" placeholder="(optional reminder — what makes you actually pick the right MIT?)"></div>
     </div>
@@ -397,7 +397,7 @@
   <div class="habit-row">
     <span class="h-cb" id="h2-display"></span>
     <div>
-      <div class="h-name">H2 · Pomodoro</div>
+      <div class="h-name" id="h2-name">H2 · Pomodoro</div>
       <div class="h-default-sub">Did you do a focused work block + a recharge break? Toggle the two boxes below — H2 auto-checks when both are marked.</div>
       <div class="h-reminder"><span class="h-reminder-icon">★</span><input class="h-reminder-input" id="h2-reminder" placeholder="(optional reminder — phone away? music?)"></div>
     </div>
@@ -429,7 +429,7 @@
   <div class="habit-row">
     <span class="h-cb" id="h3-cb" data-habit="habit3"></span>
     <div>
-      <div class="h-name">H3 · Reflect</div>
+      <div class="h-name" id="h3-name">H3 · Reflect</div>
       <div class="h-default-sub">Did you close the laptop at 9pm and write a reflection? Click the box when done.</div>
       <div class="h-reminder"><span class="h-reminder-icon">★</span><input class="h-reminder-input" id="h3-reminder" placeholder="(optional reminder — what makes you actually shut down?)"></div>
     </div>
@@ -791,6 +791,164 @@
 
   // Module-level config; populated on sign-in, used by render code
   let appConfig = { ...DEFAULT_CONFIG };
+
+  // ──── Meta tab (schema version, install date) ──────────────────────────────
+  const SCHEMA_VERSION = '1';
+  let appMeta = { schema_version: SCHEMA_VERSION, start_date: '' };
+
+  async function ensureMetaTab(token, sheetId, defaultStartDate){
+    try {
+      const res = await sheetsReq(`/spreadsheets/${sheetId}/values/meta!A:B`, 'GET', null, token);
+      if (res.values && res.values.length > 1) return res.values;
+    } catch(e) {
+      try {
+        await sheetsReq(`/spreadsheets/${sheetId}:batchUpdate`, 'POST', {
+          requests: [{ addSheet: { properties: { title: 'meta' } } }]
+        }, token);
+      } catch(e2) { /* may exist */ }
+    }
+    const rows = [
+      ['key','value'],
+      ['schema_version', SCHEMA_VERSION],
+      ['start_date', defaultStartDate]
+    ];
+    await sheetsReq(`/spreadsheets/${sheetId}/values/meta!A1?valueInputOption=RAW`,
+      'PUT', { values: rows }, token);
+    return rows;
+  }
+
+  async function readMeta(token, sheetId, defaultStartDate){
+    const meta = { schema_version: SCHEMA_VERSION, start_date: defaultStartDate };
+    try {
+      const rows = await ensureMetaTab(token, sheetId, defaultStartDate);
+      for (const row of rows.slice(1)){
+        const [k, v] = row;
+        if (k && v !== undefined && v !== '') meta[k] = String(v).trim();
+      }
+    } catch(e){ console.error('readMeta failed', e); }
+    return meta;
+  }
+
+  // ──── config_lists tab (multi-row, replaces CSV anti-pattern) ─────────────
+  // Schema: category | sort_order | key | value
+  // Used for list-typed config: reflection_tags, friends, recharge codes/labels
+  const DEFAULT_CONFIG_LISTS = [
+    ['reflection_tags', 1, 'flow', ''],
+    ['reflection_tags', 2, 'stuck', ''],
+    ['reflection_tags', 3, 'tired', ''],
+    ['reflection_tags', 4, 'shipped', ''],
+    ['reflection_tags', 5, 'breakthrough', ''],
+    ['reflection_tags', 6, 'distracted', ''],
+    ['recharge', 1, 'J', 'Journal'],
+    ['recharge', 2, 'F', 'Friend'],
+    ['recharge', 3, 'E', 'Exercise'],
+    ['recharge', 4, 'M', 'Meditate']
+    // friends: empty by default; user adds their own
+  ];
+
+  async function ensureConfigListsTab(token, sheetId){
+    try {
+      const res = await sheetsReq(`/spreadsheets/${sheetId}/values/config_lists!A:D`, 'GET', null, token);
+      if (res.values && res.values.length > 1) return res.values;
+    } catch(e) {
+      try {
+        await sheetsReq(`/spreadsheets/${sheetId}:batchUpdate`, 'POST', {
+          requests: [{ addSheet: { properties: { title: 'config_lists' } } }]
+        }, token);
+      } catch(e2) { /* may exist */ }
+    }
+    const rows = [['category','sort_order','key','value'], ...DEFAULT_CONFIG_LISTS];
+    await sheetsReq(`/spreadsheets/${sheetId}/values/config_lists!A1?valueInputOption=RAW`,
+      'PUT', { values: rows }, token);
+    return rows;
+  }
+
+  async function readConfigLists(token, sheetId){
+    const lists = { reflection_tags: [], recharge: [], friends: [] };
+    try {
+      const rows = await ensureConfigListsTab(token, sheetId);
+      for (const row of rows.slice(1)){
+        const [category, sort_order, key, value] = row;
+        const cat = String(category||'').trim();
+        const k = String(key||'').trim();
+        if (!cat || !k) continue;
+        if (!lists[cat]) lists[cat] = [];
+        lists[cat].push({
+          sort_order: parseInt(sort_order, 10) || 0,
+          key: k,
+          value: String(value||'').trim()
+        });
+      }
+      for (const cat of Object.keys(lists)){
+        lists[cat].sort((a,b) => a.sort_order - b.sort_order);
+      }
+    } catch(e){ console.error('readConfigLists failed', e); }
+    return lists;
+  }
+
+  let appLists = { reflection_tags: [], recharge: [], friends: [] };
+
+  // ──── goals tab (long-form per-user content) ──────────────────────────────
+  const DEFAULT_GOALS = {
+    north_star: '',
+    weekly_sprint: '',
+    rock_1_title: '',
+    rock_1_progress: '',
+    rock_2_title: '',
+    rock_2_progress: '',
+    rock_3_title: '',
+    rock_3_progress: '',
+    operating_notes_focus: '',
+    operating_notes_triggers: '',
+    operating_notes_victory: '',
+    friends_link_url: ''
+  };
+
+  async function ensureGoalsTab(token, sheetId){
+    try {
+      const res = await sheetsReq(`/spreadsheets/${sheetId}/values/goals!A:B`, 'GET', null, token);
+      if (res.values && res.values.length > 1) return res.values;
+    } catch(e) {
+      try {
+        await sheetsReq(`/spreadsheets/${sheetId}:batchUpdate`, 'POST', {
+          requests: [{ addSheet: { properties: { title: 'goals' } } }]
+        }, token);
+      } catch(e2) { /* may exist */ }
+    }
+    const rows = [['key','value'], ...Object.entries(DEFAULT_GOALS)];
+    await sheetsReq(`/spreadsheets/${sheetId}/values/goals!A1?valueInputOption=RAW`,
+      'PUT', { values: rows }, token);
+    return rows;
+  }
+
+  async function readGoals(token, sheetId){
+    const goals = { ...DEFAULT_GOALS };
+    try {
+      const rows = await ensureGoalsTab(token, sheetId);
+      for (const row of rows.slice(1)){
+        const [k, v] = row;
+        if (k && k in DEFAULT_GOALS && v !== undefined) goals[k] = String(v||'');
+      }
+    } catch(e){ console.error('readGoals failed', e); }
+    return goals;
+  }
+
+  async function writeGoalKey(token, sheetId, key, value){
+    // Read all rows to find the key's row (key is column A)
+    try {
+      const res = await sheetsReq(`/spreadsheets/${sheetId}/values/goals!A:A`, 'GET', null, token);
+      const keys = (res.values || []).flat();
+      const idx = keys.indexOf(key);
+      if (idx > 0){
+        await sheetsReq(`/spreadsheets/${sheetId}/values/goals!B${idx+1}?valueInputOption=RAW`,
+          'PUT', { values: [[value]] }, token);
+      } else {
+        // Append new key
+        await sheetsReq(`/spreadsheets/${sheetId}/values/goals:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
+          'POST', { values: [[key, value]] }, token);
+      }
+    } catch(e){ console.error('writeGoalKey failed', e); }
+  }
   // ────────────────────────────────────────────────────────────────────────────
 
   const STORAGE_KEY = 'pse-dashboard-v1';
@@ -1127,10 +1285,16 @@
   // ---------- Render ----------
   function renderHeader(){
     $('today-date').textContent = fmtDate(new Date());
-    const start = new Date(state.startDate); start.setHours(0,0,0,0);
+    // Prefer Sheet meta.start_date; fall back to local state.startDate
+    const startDateStr = appMeta.start_date || state.startDate;
+    const start = new Date(startDateStr); start.setHours(0,0,0,0);
     const tNow = new Date(); tNow.setHours(0,0,0,0);
     $('since-days').textContent = `Since ${Math.floor((tNow - start) / 86400000) + 1}d`;
     $('best-streak-hdr').textContent = `Streak ${state.bestStreaks.perfect}d`;
+    // Habit names from Sheet config
+    if ($('h1-name')) $('h1-name').textContent = appConfig.habit1_name || 'Habit 1';
+    if ($('h2-name')) $('h2-name').textContent = appConfig.habit2_name || 'Habit 2';
+    if ($('h3-name')) $('h3-name').textContent = appConfig.habit3_name || 'Habit 3';
     const h = new Date().getHours(), nudge = $('nudge');
     let txt = '', cls = '';
     if (h < 12) txt = 'Morning. Set your MIT to start the day.';
@@ -1528,13 +1692,42 @@
   });
 
   $('may-title-input').addEventListener('input', e => { state.goals.mayStarTitle = e.target.value; saveState(); });
-  $('may-content-input').addEventListener('input', e => { state.goals.mayStarContent = e.target.value; saveState(); });
+  // Per-key debounced sync for goals tab (each key has its own timer)
+  const _goalSyncTimers = {};
+  function syncGoalDebounced(key, getValue){
+    clearTimeout(_goalSyncTimers[key]);
+    _goalSyncTimers[key] = setTimeout(() => {
+      const cfg = getConfig();
+      if (!cfg.sheetId || !cfg.accessToken) return;
+      writeGoalKey(cfg.accessToken, cfg.sheetId, key, getValue());
+    }, 1500);
+  }
+
+  $('may-content-input').addEventListener('input', e => {
+    state.goals.mayStarContent = e.target.value; saveState();
+    syncGoalDebounced('weekly_sprint', () => state.goals.mayStarContent);
+  });
   $('next-month-input').addEventListener('input', e => { state.goals.nextMonth = e.target.value; saveState(); });
-  $('northstar-input').addEventListener('input', e => { state.goals.northStar = e.target.value; saveState(); });
-  $('ops-focus').addEventListener('input', e => { state.goals.operatingNotes.focus = e.target.value; saveState(); });
-  $('ops-triggers').addEventListener('input', e => { state.goals.operatingNotes.triggers = e.target.value; saveState(); });
-  $('ops-victory').addEventListener('input', e => { state.goals.operatingNotes.victory = e.target.value; saveState(); });
-  $('friends-url').addEventListener('input', e => { state.goals.friendsLinkUrl = e.target.value; saveState(); });
+  $('northstar-input').addEventListener('input', e => {
+    state.goals.northStar = e.target.value; saveState();
+    syncGoalDebounced('north_star', () => state.goals.northStar);
+  });
+  $('ops-focus').addEventListener('input', e => {
+    state.goals.operatingNotes.focus = e.target.value; saveState();
+    syncGoalDebounced('operating_notes_focus', () => state.goals.operatingNotes.focus);
+  });
+  $('ops-triggers').addEventListener('input', e => {
+    state.goals.operatingNotes.triggers = e.target.value; saveState();
+    syncGoalDebounced('operating_notes_triggers', () => state.goals.operatingNotes.triggers);
+  });
+  $('ops-victory').addEventListener('input', e => {
+    state.goals.operatingNotes.victory = e.target.value; saveState();
+    syncGoalDebounced('operating_notes_victory', () => state.goals.operatingNotes.victory);
+  });
+  $('friends-url').addEventListener('input', e => {
+    state.goals.friendsLinkUrl = e.target.value; saveState();
+    syncGoalDebounced('friends_link_url', () => state.goals.friendsLinkUrl);
+  });
   $('add-week-item').addEventListener('click', () => { state.goals.thisWeek.push({ text:'', done:false }); saveState(); renderGoals(); });
 
   function doExport(){
@@ -1644,16 +1837,47 @@
     if (!cfg.sheetId || !cfg.accessToken) return;
     if (Date.now() > (cfg.accessTokenExp||0)) return;
     try {
-      // 1. Config (controls reflection_tags, day_cutoff_hour, etc.)
+      // 1. Meta (schema version, install date)
+      appMeta = await readMeta(cfg.accessToken, cfg.sheetId, state.startDate || todayStr());
+      if (appMeta.start_date) state.startDate = appMeta.start_date;
+      // 2. Config (scalars: habit names, day_cutoff_hour, recharge_target, etc.)
       appConfig = await readConfig(cfg.accessToken, cfg.sheetId);
-      const sheetTags = (appConfig.reflection_tags||'')
-        .split(',').map(s => s.trim()).filter(Boolean);
-      if (sheetTags.length > 0) state.tags = sheetTags;
-      // 2. Habits rows -> state.days (Sheet is canonical for history)
+      // 3. config_lists (tags, recharge codes/labels, friends — replaces CSV)
+      appLists = await readConfigLists(cfg.accessToken, cfg.sheetId);
+      // Prefer config_lists for tags; fall back to CSV in config
+      if (appLists.reflection_tags && appLists.reflection_tags.length > 0){
+        state.tags = appLists.reflection_tags.map(t => t.key);
+      } else {
+        const sheetTags = (appConfig.reflection_tags||'')
+          .split(',').map(s => s.trim()).filter(Boolean);
+        if (sheetTags.length > 0) state.tags = sheetTags;
+      }
+      // Friends from config_lists -> state.outcomes.friendConnection.namesList
+      if (appLists.friends && appLists.friends.length > 0){
+        const names = appLists.friends.map(f => f.key);
+        state.outcomes.friendConnection.namesList = names;
+        // Ensure thisWeek has entries for each name
+        const tw = state.outcomes.friendConnection.thisWeek || {};
+        const newTw = {};
+        names.forEach(n => { newTw[n.toLowerCase()] = !!tw[n.toLowerCase()]; });
+        state.outcomes.friendConnection.thisWeek = newTw;
+      }
+      // 4. Goals tab -> state.goals
+      const goals = await readGoals(cfg.accessToken, cfg.sheetId);
+      state.goals = state.goals || {};
+      if (goals.north_star) state.goals.northStar = goals.north_star;
+      if (goals.weekly_sprint) state.goals.mayStarContent = goals.weekly_sprint;
+      if (goals.operating_notes_focus) state.goals.operatingNotes.focus = goals.operating_notes_focus;
+      if (goals.operating_notes_triggers) state.goals.operatingNotes.triggers = goals.operating_notes_triggers;
+      if (goals.operating_notes_victory) state.goals.operatingNotes.victory = goals.operating_notes_victory;
+      if (goals.friends_link_url) state.goals.friendsLinkUrl = goals.friends_link_url;
+      // Rocks: rock_N_title + rock_N_progress map to existing rockNames + notes structure
+      // (Defer full rock model migration; keep simple wiring for now)
+      // 5. Habits rows -> state.days (Sheet is canonical for history)
       await hydrateHabitsFromSheet(cfg.accessToken, cfg.sheetId);
-      // 3. Recompute streaks from rebuilt rows
+      // 6. Recompute streaks from rebuilt rows
       recomputeBestStreaks();
-      // 4. Re-bind today now that cutoff hour and rows are in
+      // 7. Re-bind today now that cutoff hour and rows are in
       today = getDay(todayStr());
       saveState();
       render();
