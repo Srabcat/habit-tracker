@@ -642,15 +642,39 @@
     return res.json();
   }
 
+  const SHEET_TITLE = 'Habit Tracker Data';
+
+  async function findExistingSheet(token){
+    // drive.file scope sees only files this app created
+    const q = encodeURIComponent(`name='${SHEET_TITLE}' and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false`);
+    const res = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,webViewLink)`, {
+      headers: { Authorization: 'Bearer ' + token }
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data.files && data.files.length > 0){
+      return { id: data.files[0].id, url: data.files[0].webViewLink };
+    }
+    return null;
+  }
+
   async function createSheet(token){
+    // Reuse existing if app already created one in this user's Drive
+    const existing = await findExistingSheet(token);
+    if (existing) return existing;
     const data = await sheetsReq('/spreadsheets', 'POST', {
-      properties: { title: 'Habit Tracker Data' },
+      properties: { title: SHEET_TITLE },
       sheets: [{ properties: { title: 'habits' } }]
     }, token);
     return { id: data.spreadsheetId, url: data.spreadsheetUrl };
   }
 
   async function initSheetHeaders(token, sheetId){
+    // Only add headers if sheet is empty (avoids duplicate headers when reusing)
+    try {
+      const res = await sheetsReq(`/spreadsheets/${sheetId}/values/habits!A1:A1`, 'GET', null, token);
+      if (res.values && res.values.length > 0) return;
+    } catch(e) { /* sheet may not have 'habits' tab yet — fall through to append */ }
     await sheetsReq(`/spreadsheets/${sheetId}/values/habits!A1:append?valueInputOption=RAW`,
       'POST', { values: [SHEET_HEADERS] }, token);
   }
