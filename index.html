@@ -562,6 +562,9 @@
   <button id="reset-btn">Reset everything</button>
   <div class="last-export">Last backup: <span id="last-backup-meta">never</span></div>
   <div id="sync-status" style="font-size:11px; margin-top:4px;"></div>
+  <div id="sheet-link-wrap" style="display:none; margin-top:4px;">
+    <a id="sheet-link" href="#" target="_blank" rel="noopener" style="font-size:11px; color:#94a3b8; text-decoration:none;">📊 Open my Sheet</a>
+  </div>
   <input type="file" id="import-file" accept=".json" style="display:none;">
 </div>
 
@@ -569,37 +572,102 @@
 (function(){
   "use strict";
 
-  // ── Google Auth ─────────────────────────────────────────────────────────────
-  const ALLOWED_EMAIL = 'srabcat@gmail.com';
+  // ── Config ───────────────────────────────────────────────────────────────────
+  const CLIENT_ID  = '26835881512-r8ogifctlq2ij0b1fev86d46j4ngkhs4.apps.googleusercontent.com';
   const AUTH_EXP_KEY = 'pse-auth-exp';
+  const CONFIG_KEY   = 'pse-config';
 
-  function handleGoogleSignIn(response) {
-    const payload = JSON.parse(atob(response.credential.split('.')[1]));
-    if (payload.email === ALLOWED_EMAIL) {
-      localStorage.setItem(AUTH_EXP_KEY, Date.now() + 7 * 24 * 60 * 60 * 1000);
-      window.location.reload();
-    } else {
-      document.getElementById('auth-error').textContent = 'Access denied — this tracker is private.';
+  function getConfig(){ try { return JSON.parse(localStorage.getItem(CONFIG_KEY)) || {}; } catch { return {}; } }
+  function setConfig(u){ localStorage.setItem(CONFIG_KEY, JSON.stringify({...getConfig(),...u})); }
+
+  // ── Google Auth + Sheets token ───────────────────────────────────────────────
+  let _tokenClient = null;
+  function getTokenClient(){
+    if (!_tokenClient && window.google?.accounts?.oauth2){
+      _tokenClient = google.accounts.oauth2.initTokenClient({
+        client_id: CLIENT_ID,
+        scope: 'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file',
+        callback: handleTokenResponse
+      });
     }
+    return _tokenClient;
+  }
+
+  async function handleTokenResponse(tr){
+    if (tr.error){ console.error('token error', tr.error); return; }
+    const exp = Date.now() + (tr.expires_in - 60) * 1000;
+    setConfig({ accessToken: tr.access_token, accessTokenExp: exp });
+    const cfg = getConfig();
+    if (!cfg.sheetId){
+      try {
+        const { id, url } = await createSheet(tr.access_token);
+        await initSheetHeaders(tr.access_token, id);
+        setConfig({ sheetId: id, sheetUrl: url });
+      } catch(e){ console.error('sheet init failed', e); }
+    }
+    window.location.reload();
+  }
+
+  function handleGoogleSignIn(response){
+    const payload = JSON.parse(atob(response.credential.split('.')[1]));
+    setConfig({ email: payload.email });
+    localStorage.setItem(AUTH_EXP_KEY, Date.now() + 7 * 24 * 60 * 60 * 1000);
+    const tc = getTokenClient();
+    if (tc) tc.requestAccessToken({ prompt: 'consent' });
+    else window.location.reload();
   }
   window.handleGoogleSignIn = handleGoogleSignIn;
 
-  function checkAuth() {
+  function checkAuth(){
     const exp = localStorage.getItem(AUTH_EXP_KEY);
-    if (exp && Date.now() < parseInt(exp)) {
+    if (exp && Date.now() < parseInt(exp)){
       document.getElementById('auth-gate').style.display = 'none';
       return true;
     }
     document.getElementById('auth-gate').style.display = 'flex';
     return false;
   }
-  // ────────────────────────────────────────────────────────────────────────────
 
-  // ── Google Sheets sync ──────────────────────────────────────────────────────
-  // 1. Create a Google Sheet, open Extensions > Apps Script, paste apps-script.gs
-  // 2. Deploy as web app (Execute as: Me, Who has access: Anyone), copy the URL
-  // 3. Paste the URL here:
-  const SHEETS_URL = 'https://script.google.com/macros/s/AKfycbz8-zWJ-kHlYJ95_Z-XWCJd92IH3k8F-d0cSBWx-sCvp5blH-jfuT2QsX-69m6EeUz8/exec';
+  // ── Sheets API helpers ───────────────────────────────────────────────────────
+  const SHEET_HEADERS = ['date','habit1_done','habit2_done','habit3_done','perfect_day',
+    'deep_work','recharge_j','recharge_f','recharge_e','recharge_m','recharge_count',
+    'mit_text','reflection','tags','friend_count','energy_rating','synced_at'];
+
+  async function sheetsReq(path, method, body, token){
+    const res = await fetch('https://sheets.googleapis.com/v4' + path, {
+      method,
+      headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+      ...(body ? { body: JSON.stringify(body) } : {})
+    });
+    if (!res.ok) throw new Error('Sheets API ' + res.status + ': ' + await res.text());
+    return res.json();
+  }
+
+  async function createSheet(token){
+    const data = await sheetsReq('/spreadsheets', 'POST', {
+      properties: { title: 'Habit Tracker Data' },
+      sheets: [{ properties: { title: 'habits' } }]
+    }, token);
+    return { id: data.spreadsheetId, url: data.spreadsheetUrl };
+  }
+
+  async function initSheetHeaders(token, sheetId){
+    await sheetsReq(`/spreadsheets/${sheetId}/values/habits!A1:append?valueInputOption=RAW`,
+      'POST', { values: [SHEET_HEADERS] }, token);
+  }
+
+  async function upsertRow(token, sheetId, rowData){
+    const res = await sheetsReq(`/spreadsheets/${sheetId}/values/habits!A:A`, 'GET', null, token);
+    const dates = (res.values || []).flat();
+    const idx = dates.indexOf(rowData[0]);
+    if (idx > 0){
+      await sheetsReq(`/spreadsheets/${sheetId}/values/habits!A${idx+1}?valueInputOption=RAW`,
+        'PUT', { values: [rowData] }, token);
+    } else {
+      await sheetsReq(`/spreadsheets/${sheetId}/values/habits:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
+        'POST', { values: [rowData] }, token);
+    }
+  }
   // ────────────────────────────────────────────────────────────────────────────
 
   const STORAGE_KEY = 'pse-dashboard-v1';
@@ -637,13 +705,13 @@
       habitReminders:{ habit1:'', habit2:'', habit3:'' },
       tags:[...DEFAULT_TAGS], days:{}, sheetsSynced:{},
       outcomes:{
-        employerRelease:{ done:false, doneDate:null, targetDate:'', notes:'Public release of the product to actual employer customers.' },
+        employerRelease:{ done:false, doneDate:null, targetDate:'', notes:'' },
         friendConnection:{
           weeklyTarget:2, currentWeekStart:dateStr(mondayOf(new Date())),
-          thisWeek:{ boots:false, daphane:false, eric:false, anisha:false, jacky:false },
-          weeklyHistory:[], notes:'Sustain meaningful contact with the 5 named friends.'
+          thisWeek:{ friend1:false, friend2:false, friend3:false },
+          weeklyHistory:[], notes:''
         },
-        health:{ weeklyEnergy:[], notes:'I am the instrument. Daily recharge keeps the engine running.' }
+        health:{ weeklyEnergy:[], notes:'' }
       },
       archivedRocks:[],
       goals:{
@@ -813,7 +881,7 @@
     if (state.goals.weekMitWeekStart !== m){ state.goals.weekMit = ''; state.goals.weekMitWeekStart = m; saveState(); }
   }
   function ensureFriendNames(){
-    if (!state.outcomes.friendConnection.namesList) state.outcomes.friendConnection.namesList = ['boots','daphane','eric','anisha','jacky'];
+    if (!state.outcomes.friendConnection.namesList) state.outcomes.friendConnection.namesList = ['friend1','friend2','friend3'];
   }
 
   // ---------- Sync status ----------
@@ -822,38 +890,38 @@
     if (!el) return;
     if (s === 'ok'){ el.textContent = '✓ synced to Sheets'; el.style.color = '#16a34a'; }
     else if (s === 'syncing'){ el.textContent = 'syncing…'; el.style.color = '#94a3b8'; }
-    else if (s === 'error'){ el.textContent = '✗ sync failed — check SHEETS_URL'; el.style.color = '#dc2626'; }
+    else if (s === 'error'){ el.textContent = '✗ sync failed — check console'; el.style.color = '#dc2626'; }
     else { el.textContent = ''; }
   }
 
   function debounce(fn, ms){ let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
 
-  // ---------- Google Sheets sync ----------
+  // ---------- Google Sheets sync (direct Sheets API) ----------
   async function syncDayToSheets(ds){
-    if (!SHEETS_URL) return;
+    const cfg = getConfig();
+    if (!cfg.sheetId || !cfg.accessToken) return;
+    if (Date.now() > cfg.accessTokenExp){
+      const tc = getTokenClient();
+      if (tc) tc.requestAccessToken({ prompt: '' });
+      return;
+    }
     const day = state.days[ds];
     if (!day) return;
     const dn = isHabitDone(day);
     const energyArr = state.outcomes.health.weeklyEnergy;
     const lastEnergy = energyArr.length > 0 ? energyArr[energyArr.length-1].rating : '';
     const friendCount = Object.values(state.outcomes.friendConnection.thisWeek).filter(Boolean).length;
-    const payload = {
-      date:ds,
-      habit1_done:dn.habit1, habit2_done:dn.habit2, habit3_done:dn.habit3,
-      perfect_day: dn.habit1 && dn.habit2 && dn.habit3,
-      deep_work:!!day.deepWork,
-      recharge_j:!!(day.recharge && day.recharge.J), recharge_f:!!(day.recharge && day.recharge.F),
-      recharge_e:!!(day.recharge && day.recharge.E), recharge_m:!!(day.recharge && day.recharge.M),
-      recharge_count:rechargeCount(day),
-      mit_text:day.mit||'', reflection:day.reflection||'',
-      tags:(day.reflectionTags||[]).join(', '),
-      friend_count:friendCount, energy_rating:lastEnergy,
-      synced_at:new Date().toISOString()
-    };
+    const row = [
+      ds, dn.habit1, dn.habit2, dn.habit3, dn.habit1 && dn.habit2 && dn.habit3,
+      !!day.deepWork,
+      !!(day.recharge?.J), !!(day.recharge?.F), !!(day.recharge?.E), !!(day.recharge?.M),
+      rechargeCount(day),
+      day.mit||'', day.reflection||'', (day.reflectionTags||[]).join(', '),
+      friendCount, lastEnergy, new Date().toISOString()
+    ];
     setSyncStatus('syncing');
     try {
-      // no-cors avoids CORS preflight issues with Apps Script redirect
-      await fetch(SHEETS_URL, { method:'POST', mode:'no-cors', body:JSON.stringify(payload) });
+      await upsertRow(cfg.accessToken, cfg.sheetId, row);
       state.sheetsSynced[ds] = true;
       saveState();
       setSyncStatus('ok');
@@ -1326,6 +1394,12 @@
 
   if (checkAuth()) {
     render();
+    // Show Sheet link if configured
+    const cfg = getConfig();
+    if (cfg.sheetUrl) {
+      $('sheet-link').href = cfg.sheetUrl;
+      $('sheet-link-wrap').style.display = 'block';
+    }
     // Silently sync yesterday if it was missed
     const yd = daysAgoStr(1);
     if (state.days[yd] && !state.sheetsSynced[yd]) syncDayToSheets(yd);
