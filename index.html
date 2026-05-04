@@ -326,8 +326,6 @@
       <button class="pencil" data-pencil="health" title="Edit rock">✎</button>
       <div class="rock-name" id="hth-name">Health · Mental + Physical</div>
       <div class="rock-tag">mixed metric</div>
-      <div class="energy-row"><span class="energy-num" id="hth-energy-num">7</span><span class="energy-lab">/10 weekly energy</span></div>
-      <input type="range" min="1" max="10" value="7" class="slider" id="hth-energy-slider">
       <div class="auto-stats">Perfect-day rate · <b id="hth-perfect-rate">—</b> this month<br>7d recharge avg · <b id="hth-recharge-avg">—</b></div>
       <div class="linked-habits">Daily fuel · <span class="lh-pill">J · Journal</span><span class="lh-pill">E · Exercise</span><span class="lh-pill">M · Meditate</span><span class="lh-pill">Habit 3</span></div>
     </div>
@@ -642,7 +640,8 @@
   const SHEET_HEADERS = ['date','habit1_done','habit2_done','habit3_done','perfect_day',
     'deep_work','recharge_j','recharge_f','recharge_e','recharge_m','recharge_count',
     'mit_text','reflection','tags','friend_count','energy_rating','synced_at',
-    'start_date','best_streak'];
+    'start_date','best_streak',
+    'p2_title','p2_done','p3_title','p3_done','p4_title','p4_done','p5_title','p5_done','p6_title','p6_done'];
 
   async function sheetsReq(path, method, body, token){
     const res = await fetch('https://sheets.googleapis.com/v4' + path, {
@@ -898,12 +897,14 @@
   const DEFAULT_GOALS = {
     north_star: '',
     weekly_sprint: '',
-    rock_1_title: '',
-    rock_1_progress: '',
-    rock_2_title: '',
-    rock_2_progress: '',
-    rock_3_title: '',
-    rock_3_progress: '',
+    rock_1_name: 'Employer Release',
+    rock_1_target: '',
+    rock_1_notes: '',
+    rock_2_name: 'Friend Connection',
+    rock_2_weekly_target: '2',
+    rock_2_notes: '',
+    rock_3_name: 'Health · Mental + Physical',
+    rock_3_notes: '',
     operating_notes_focus: '',
     operating_notes_triggers: '',
     operating_notes_victory: '',
@@ -1147,6 +1148,13 @@
       if (row.tags !== undefined){
         day.reflectionTags = String(row.tags||'').split(',').map(s=>s.trim()).filter(Boolean);
       }
+      // P2-P6 secondaries
+      day.secondaries = day.secondaries || ['','','','',''];
+      day.secondariesDone = day.secondariesDone || [false,false,false,false,false];
+      [2,3,4,5,6].forEach((n, i) => {
+        if (row['p'+n+'_title'] !== undefined) day.secondaries[i] = String(row['p'+n+'_title']||'');
+        if (row['p'+n+'_done'] !== undefined) day.secondariesDone[i] = parseBool(row['p'+n+'_done']);
+      });
       state.days[ds] = day;
     }
     saveState();
@@ -1308,9 +1316,10 @@
     const day = state.days[ds];
     if (!day) return;
     const dn = isHabitDone(day);
-    const energyArr = state.outcomes.health.weeklyEnergy;
-    const lastEnergy = energyArr.length > 0 ? energyArr[energyArr.length-1].rating : '';
+    const lastEnergy = ''; // Weekly energy feature removed in M3c
     const friendCount = Object.values(state.outcomes.friendConnection.thisWeek).filter(Boolean).length;
+    const sec = day.secondaries || ['','','','',''];
+    const secDone = day.secondariesDone || [false,false,false,false,false];
     const row = [
       ds, dn.habit1, dn.habit2, dn.habit3, dn.habit1 && dn.habit2 && dn.habit3,
       !!day.deepWork,
@@ -1318,7 +1327,9 @@
       rechargeCount(day),
       day.mit||'', day.reflection||'', (day.reflectionTags||[]).join(', '),
       friendCount, lastEnergy, new Date().toISOString(),
-      state.startDate, state.bestStreaks.perfect
+      state.startDate, state.bestStreaks.perfect,
+      sec[0]||'', !!secDone[0], sec[1]||'', !!secDone[1], sec[2]||'', !!secDone[2],
+      sec[3]||'', !!secDone[3], sec[4]||'', !!secDone[4]
     ];
     setSyncStatus('syncing');
     try {
@@ -1413,9 +1424,6 @@
       chips.appendChild(c);
     });
 
-    const lastEnergy = o.health.weeklyEnergy.length > 0 ? o.health.weeklyEnergy[o.health.weeklyEnergy.length-1].rating : 7;
-    $('hth-energy-num').textContent = lastEnergy;
-    $('hth-energy-slider').value = lastEnergy;
     const pr = perfectRate30();
     $('hth-perfect-rate').textContent = pr === null ? '—' : pr + '%';
     $('hth-recharge-avg').textContent = avg7d().toFixed(1);
@@ -1682,8 +1690,14 @@
 
   document.querySelectorAll('.sec').forEach(sec => {
     const i = +sec.dataset.idx;
-    sec.querySelector('input[type="checkbox"]').addEventListener('change', e => { today.secondariesDone[i] = e.target.checked; saveState(); renderToday(); });
-    sec.querySelector('input[type="text"]').addEventListener('input', e => { today.secondaries[i] = e.target.value; saveState(); });
+    sec.querySelector('input[type="checkbox"]').addEventListener('change', e => {
+      today.secondariesDone[i] = e.target.checked; saveState(); renderToday();
+      syncDayToSheets(todayStr());
+    });
+    sec.querySelector('input[type="text"]').addEventListener('input', debounce(e => {
+      today.secondaries[i] = e.target.value; saveState();
+      syncDayToSheets(todayStr());
+    }, 1500));
   });
 
   $('h1-cb').addEventListener('click', () => { today.mitSet = !today.mitSet; saveState(); render(); syncDayToSheets(todayStr()); });
@@ -1706,22 +1720,34 @@
     const o = state.outcomes.employerRelease; o.done = !o.done; o.doneDate = o.done ? new Date().toISOString() : null;
     saveState(); renderRocks();
   });
-  $('hth-energy-slider').addEventListener('input', e => {
-    const r = +e.target.value, m = dateStr(mondayOf(new Date())), arr = state.outcomes.health.weeklyEnergy;
-    const last = arr.length > 0 ? arr[arr.length-1] : null;
-    if (last && last.weekStart === m) last.rating = r; else arr.push({ weekStart:m, rating:r });
-    $('hth-energy-num').textContent = r; saveState();
-  });
+  // Weekly energy slider removed in M3c.
 
   document.querySelectorAll('.pencil').forEach(btn => {
     btn.addEventListener('click', () => { const k = btn.dataset.pencil; state.uiState.rocksEditOpen[k] = !state.uiState.rocksEditOpen[k]; saveState(); renderRocks(); });
   });
-  $('emp-name-input').addEventListener('input', e => { state.goals.rockNames.employer = e.target.value; saveState(); $('emp-name').textContent = e.target.value; });
-  $('emp-target-input').addEventListener('input', e => { state.outcomes.employerRelease.targetDate = e.target.value; saveState(); renderRocks(); });
-  $('emp-notes-input').addEventListener('input', e => { state.outcomes.employerRelease.notes = e.target.value; saveState(); });
-  $('frd-name-input').addEventListener('input', e => { state.goals.rockNames.friend = e.target.value; saveState(); $('frd-name').textContent = e.target.value; });
-  $('frd-target-input').addEventListener('input', e => { state.outcomes.friendConnection.weeklyTarget = +e.target.value || 1; saveState(); renderRocks(); });
+  $('emp-name-input').addEventListener('input', e => {
+    state.goals.rockNames.employer = e.target.value; saveState(); $('emp-name').textContent = e.target.value;
+    syncGoalDebounced('rock_1_name', () => state.goals.rockNames.employer);
+  });
+  $('emp-target-input').addEventListener('input', e => {
+    state.outcomes.employerRelease.targetDate = e.target.value; saveState(); renderRocks();
+    syncGoalDebounced('rock_1_target', () => state.outcomes.employerRelease.targetDate);
+  });
+  $('emp-notes-input').addEventListener('input', e => {
+    state.outcomes.employerRelease.notes = e.target.value; saveState();
+    syncGoalDebounced('rock_1_notes', () => state.outcomes.employerRelease.notes);
+  });
+  $('frd-name-input').addEventListener('input', e => {
+    state.goals.rockNames.friend = e.target.value; saveState(); $('frd-name').textContent = e.target.value;
+    syncGoalDebounced('rock_2_name', () => state.goals.rockNames.friend);
+  });
+  $('frd-target-input').addEventListener('input', e => {
+    state.outcomes.friendConnection.weeklyTarget = +e.target.value || 1; saveState(); renderRocks();
+    syncGoalDebounced('rock_2_weekly_target', () => String(state.outcomes.friendConnection.weeklyTarget));
+  });
   $('frd-names-input').addEventListener('input', e => {
+    // Friends list is config_lists-driven on hydrate; in-app edits are
+    // session-only until M3-followup adds writeback. Show note?
     const list = e.target.value.split(',').map(s => s.trim()).filter(Boolean);
     state.outcomes.friendConnection.namesList = list;
     const tw = {};
@@ -1729,9 +1755,18 @@
     state.outcomes.friendConnection.thisWeek = tw;
     saveState(); renderRocks();
   });
-  $('frd-notes-input').addEventListener('input', e => { state.outcomes.friendConnection.notes = e.target.value; saveState(); });
-  $('hth-name-input').addEventListener('input', e => { state.goals.rockNames.health = e.target.value; saveState(); $('hth-name').textContent = e.target.value; });
-  $('hth-notes-input').addEventListener('input', e => { state.outcomes.health.notes = e.target.value; saveState(); });
+  $('frd-notes-input').addEventListener('input', e => {
+    state.outcomes.friendConnection.notes = e.target.value; saveState();
+    syncGoalDebounced('rock_2_notes', () => state.outcomes.friendConnection.notes);
+  });
+  $('hth-name-input').addEventListener('input', e => {
+    state.goals.rockNames.health = e.target.value; saveState(); $('hth-name').textContent = e.target.value;
+    syncGoalDebounced('rock_3_name', () => state.goals.rockNames.health);
+  });
+  $('hth-notes-input').addEventListener('input', e => {
+    state.outcomes.health.notes = e.target.value; saveState();
+    syncGoalDebounced('rock_3_notes', () => state.outcomes.health.notes);
+  });
 
   document.querySelectorAll('[data-archive]').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -1948,6 +1983,19 @@
       if (goals.operating_notes_triggers !== undefined) state.goals.operatingNotes.triggers = goals.operating_notes_triggers;
       if (goals.operating_notes_victory !== undefined) state.goals.operatingNotes.victory = goals.operating_notes_victory;
       if (goals.friends_link_url !== undefined) state.goals.friendsLinkUrl = goals.friends_link_url;
+      // Rocks: Sheet → state.goals.rockNames + state.outcomes.*
+      state.goals.rockNames = state.goals.rockNames || {};
+      if (goals.rock_1_name !== undefined) state.goals.rockNames.employer = goals.rock_1_name;
+      if (goals.rock_1_target !== undefined) state.outcomes.employerRelease.targetDate = goals.rock_1_target;
+      if (goals.rock_1_notes !== undefined) state.outcomes.employerRelease.notes = goals.rock_1_notes;
+      if (goals.rock_2_name !== undefined) state.goals.rockNames.friend = goals.rock_2_name;
+      if (goals.rock_2_weekly_target !== undefined){
+        const wt = parseInt(goals.rock_2_weekly_target, 10);
+        if (Number.isFinite(wt) && wt > 0) state.outcomes.friendConnection.weeklyTarget = wt;
+      }
+      if (goals.rock_2_notes !== undefined) state.outcomes.friendConnection.notes = goals.rock_2_notes;
+      if (goals.rock_3_name !== undefined) state.goals.rockNames.health = goals.rock_3_name;
+      if (goals.rock_3_notes !== undefined) state.outcomes.health.notes = goals.rock_3_notes;
       // Rocks: rock_N_title + rock_N_progress map to existing rockNames + notes structure
       // (Defer full rock model migration; keep simple wiring for now)
       // 5. Habits rows -> state.days (Sheet is canonical for history)
