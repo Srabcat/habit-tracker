@@ -559,7 +559,8 @@
   Data lives in this browser + Google Sheets.
   <button id="export-btn">Export backup</button>·
   <button id="import-btn">Import backup</button>·
-  <button id="reset-btn">Reset everything</button>
+  <button id="reset-btn">Reset everything</button>·
+  <button id="signout-btn">Sign out</button>
   <div class="last-export">Last backup: <span id="last-backup-meta">never</span></div>
   <div id="sync-status" style="font-size:11px; margin-top:4px;"></div>
   <div id="sheet-link-wrap" style="display:none; margin-top:4px;">
@@ -1380,6 +1381,13 @@
     if (!confirm('Reset everything? Cannot be undone.')) return;
     localStorage.removeItem(STORAGE_KEY);
     state = loadState(); ensureFriendNames(); today = getDay(todayStr()); render();
+  });
+
+  $('signout-btn').addEventListener('click', () => {
+    localStorage.removeItem(AUTH_EXP_KEY);
+    localStorage.removeItem(CONFIG_KEY);
+    if (window.google?.accounts?.id) google.accounts.id.disableAutoSelect();
+    window.location.reload();
   });
 
   document.querySelectorAll('#range-toggle button').forEach(b => {
