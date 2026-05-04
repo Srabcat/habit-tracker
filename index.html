@@ -1924,10 +1924,11 @@
 
   // If Drive search fails (e.g. drive.file scope not granted) AND no sheetId
   // saved, give the user a manual escape hatch.
-  function promptForSheetUrl(){
+  async function promptForSheetUrl(){
     const url = window.prompt(
-      "Couldn't find or create your Habit Tracker Sheet automatically.\n\n" +
-      "If you already have one, paste its URL here. Otherwise click Cancel and check OAuth scopes.",
+      "Couldn't auto-find your Habit Tracker Sheet.\n\n" +
+      "Paste its URL here (it'll be tagged so future devices find it automatically).\n\n" +
+      "Or click Cancel and the app will create a fresh one on next sign-in.",
       ''
     );
     if (!url) {
@@ -1937,8 +1938,15 @@
       return;
     }
     const m = url.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
-    if (!m) { alert('That doesn\'t look like a Google Sheets URL.'); return; }
-    setConfig({ sheetId: m[1], sheetUrl: url.split('?')[0] });
+    if (!m) { alert("That doesn't look like a Google Sheets URL."); return; }
+    const sheetId = m[1];
+    setConfig({ sheetId, sheetUrl: url.split('?')[0] });
+    // Tag the Sheet so future devices/sign-ins find it via appProperties search
+    const cfg = getConfig();
+    if (cfg.accessToken) {
+      try { await tagSheetWithAppProperty(cfg.accessToken, sheetId); }
+      catch(e){ console.warn('tag failed (Sheet still saved locally)', e); }
+    }
     window.location.reload();
   }
 
