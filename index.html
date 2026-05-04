@@ -247,8 +247,17 @@
     .pat-grid { grid-template-columns: 1fr; }
   }
 </style>
+<script src="https://accounts.google.com/gsi/client" async></script>
 </head>
 <body>
+
+<div id="auth-gate" style="display:none;position:fixed;inset:0;z-index:9999;background:#f6f7f9;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;">
+  <h2 style="font-size:1.4rem;color:#1e293b;margin:0">Habit Tracker</h2>
+  <p style="color:#64748b;margin:0;font-size:.95rem">Sign in to continue</p>
+  <div id="g_id_onload" data-client_id="26835881512-r8ogifctlq2ij0b1fev86d46j4ngkhs4.apps.googleusercontent.com" data-callback="handleGoogleSignIn" data-auto_select="true"></div>
+  <div class="g_id_signin" data-type="standard" data-theme="outline" data-size="large"></div>
+  <p id="auth-error" style="color:#dc2626;font-size:.85rem;margin:0"></p>
+</div>
 
 <div id="backup-banner" class="backup-banner">
   <span><b>Backup reminder:</b> <span id="backup-days"></span> since your last export.</span>
@@ -559,6 +568,32 @@
 <script>
 (function(){
   "use strict";
+
+  // ── Google Auth ─────────────────────────────────────────────────────────────
+  const ALLOWED_EMAIL = 'srabcat@gmail.com';
+  const AUTH_EXP_KEY = 'pse-auth-exp';
+
+  function handleGoogleSignIn(response) {
+    const payload = JSON.parse(atob(response.credential.split('.')[1]));
+    if (payload.email === ALLOWED_EMAIL) {
+      localStorage.setItem(AUTH_EXP_KEY, Date.now() + 7 * 24 * 60 * 60 * 1000);
+      window.location.reload();
+    } else {
+      document.getElementById('auth-error').textContent = 'Access denied — this tracker is private.';
+    }
+  }
+  window.handleGoogleSignIn = handleGoogleSignIn;
+
+  function checkAuth() {
+    const exp = localStorage.getItem(AUTH_EXP_KEY);
+    if (exp && Date.now() < parseInt(exp)) {
+      document.getElementById('auth-gate').style.display = 'none';
+      return true;
+    }
+    document.getElementById('auth-gate').style.display = 'flex';
+    return false;
+  }
+  // ────────────────────────────────────────────────────────────────────────────
 
   // ── Google Sheets sync ──────────────────────────────────────────────────────
   // 1. Create a Google Sheet, open Extensions > Apps Script, paste apps-script.gs
@@ -1289,11 +1324,12 @@
     render();
   }, 60000);
 
-  render();
-
-  // Silently sync yesterday if it was missed
-  const yd = daysAgoStr(1);
-  if (state.days[yd] && !state.sheetsSynced[yd]) syncDayToSheets(yd);
+  if (checkAuth()) {
+    render();
+    // Silently sync yesterday if it was missed
+    const yd = daysAgoStr(1);
+    if (state.days[yd] && !state.sheetsSynced[yd]) syncDayToSheets(yd);
+  }
 
 })();
 </script>
