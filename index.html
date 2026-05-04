@@ -693,6 +693,56 @@
         'POST', { values: [rowData] }, token);
     }
   }
+
+  // ──── Config tab (key/value, user-editable in Sheet) ──────────────────────
+  // Defaults live here. New users get these seeded into their Sheet on first sign-in.
+  // Users edit the Sheet directly to customize; app reads on next page load.
+  const DEFAULT_CONFIG = {
+    habit1_name: 'MIT (most important task)',
+    habit2_name: 'Deep Work + Recharge',
+    habit3_name: 'Shutdown Reflect',
+    recharge_codes: 'J,F,E,M',
+    recharge_labels: 'Journal,Friend,Exercise,Meditate',
+    recharge_target: '1',
+    reflection_tags: 'flow,stuck,tired,shipped,breakthrough,distracted',
+    friend_names: '',
+    day_cutoff_hour: '4',
+    schema_version: '1'
+  };
+
+  async function ensureConfigTab(token, sheetId){
+    try {
+      const res = await sheetsReq(`/spreadsheets/${sheetId}/values/config!A:B`, 'GET', null, token);
+      if (res.values && res.values.length > 1) return res.values;
+    } catch(e) {
+      // Tab missing — create it
+      try {
+        await sheetsReq(`/spreadsheets/${sheetId}:batchUpdate`, 'POST', {
+          requests: [{ addSheet: { properties: { title: 'config' } } }]
+        }, token);
+      } catch(e2) { /* tab may already exist */ }
+    }
+    // Seed defaults
+    const rows = [['key','value'], ...Object.entries(DEFAULT_CONFIG)];
+    await sheetsReq(`/spreadsheets/${sheetId}/values/config!A1?valueInputOption=RAW`,
+      'PUT', { values: rows }, token);
+    return rows;
+  }
+
+  async function readConfig(token, sheetId){
+    const cfg = { ...DEFAULT_CONFIG };
+    try {
+      const rows = await ensureConfigTab(token, sheetId);
+      for (const row of rows.slice(1)){
+        const [k, v] = row;
+        if (k && k in DEFAULT_CONFIG && v !== undefined && v !== '') cfg[k] = v;
+      }
+    } catch(e){ console.error('readConfig failed, using defaults', e); }
+    return cfg;
+  }
+
+  // Module-level config; populated on sign-in, used by render code
+  let appConfig = { ...DEFAULT_CONFIG };
   // ────────────────────────────────────────────────────────────────────────────
 
   const STORAGE_KEY = 'pse-dashboard-v1';
@@ -1458,12 +1508,29 @@
     }
   }
 
+  async function hydrateConfigFromSheet(){
+    const cfg = getConfig();
+    if (!cfg.sheetId || !cfg.accessToken) return;
+    if (Date.now() > (cfg.accessTokenExp||0)) return;
+    try {
+      appConfig = await readConfig(cfg.accessToken, cfg.sheetId);
+      // Override session-mutable state.tags with Sheet-driven list (CSV)
+      const sheetTags = (appConfig.reflection_tags||'')
+        .split(',').map(s => s.trim()).filter(Boolean);
+      if (sheetTags.length > 0) state.tags = sheetTags;
+      render();
+    } catch(e){ console.error('hydrateConfigFromSheet failed', e); }
+  }
+
   if (checkAuth()) {
     render();
-    ensureSheetExists();
-    // Silently sync yesterday if it was missed
-    const yd = daysAgoStr(1);
-    if (state.days[yd] && !state.sheetsSynced[yd]) syncDayToSheets(yd);
+    (async () => {
+      await ensureSheetExists();
+      await hydrateConfigFromSheet();
+      // Silently sync yesterday if it was missed
+      const yd = daysAgoStr(1);
+      if (state.days[yd] && !state.sheetsSynced[yd]) syncDayToSheets(yd);
+    })();
   }
 
 })();
