@@ -645,18 +645,44 @@
   }
 
   const SHEET_TITLE = 'Habit Tracker Data';
+  const APP_TAG_KEY = 'habitTrackerApp';
+  const APP_TAG_VALUE = 'v1';
 
-  async function findExistingSheet(token){
-    // drive.file scope sees only files this app created
-    const q = encodeURIComponent(`name='${SHEET_TITLE}' and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false`);
-    const res = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,webViewLink)`, {
+  async function driveSearch(token, q){
+    const res = await fetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name,webViewLink,appProperties)`, {
       headers: { Authorization: 'Bearer ' + token }
     });
-    if (!res.ok) return null;
+    if (!res.ok) throw new Error('Drive ' + res.status + ': ' + await res.text());
     const data = await res.json();
-    if (data.files && data.files.length > 0){
-      return { id: data.files[0].id, url: data.files[0].webViewLink };
-    }
+    return data.files || [];
+  }
+
+  async function tagSheetWithAppProperty(token, sheetId){
+    try {
+      await fetch(`https://www.googleapis.com/drive/v3/files/${sheetId}`, {
+        method: 'PATCH',
+        headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ appProperties: { [APP_TAG_KEY]: APP_TAG_VALUE } })
+      });
+    } catch(e){ console.error('tagSheetWithAppProperty failed', e); }
+  }
+
+  async function findExistingSheet(token){
+    // 1. Try appProperties tag (survives rename, exact match)
+    try {
+      const tagged = await driveSearch(token,
+        `appProperties has { key='${APP_TAG_KEY}' and value='${APP_TAG_VALUE}' } and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false`);
+      if (tagged.length > 0) return { id: tagged[0].id, url: tagged[0].webViewLink };
+    } catch(e){ /* fall through to filename search */ }
+    // 2. Fallback: filename search, then bootstrap appProperties tag
+    try {
+      const named = await driveSearch(token,
+        `name='${SHEET_TITLE}' and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false`);
+      if (named.length > 0){
+        await tagSheetWithAppProperty(token, named[0].id);
+        return { id: named[0].id, url: named[0].webViewLink };
+      }
+    } catch(e){ /* drive scope may be missing */ }
     return null;
   }
 
@@ -668,6 +694,7 @@
       properties: { title: SHEET_TITLE },
       sheets: [{ properties: { title: 'habits' } }]
     }, token);
+    await tagSheetWithAppProperty(token, data.spreadsheetId);
     return { id: data.spreadsheetId, url: data.spreadsheetUrl };
   }
 
@@ -692,6 +719,27 @@
       await sheetsReq(`/spreadsheets/${sheetId}/values/habits:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
         'POST', { values: [rowData] }, token);
     }
+  }
+
+  // ──── Header-name based read of habits tab ────────────────────────────────
+  // Defends against user-edited Sheets where columns may be reordered.
+  function parseBool(v){
+    if (typeof v === 'boolean') return v;
+    if (typeof v === 'number') return v !== 0;
+    const s = String(v||'').trim().toLowerCase();
+    return s === 'true' || s === '1' || s === 'yes' || s === 'checked' || s === '✓' || s === 'x';
+  }
+
+  async function readHabitsTab(token, sheetId){
+    const res = await sheetsReq(`/spreadsheets/${sheetId}/values/habits?valueRenderOption=UNFORMATTED_VALUE`, 'GET', null, token);
+    const rows = res.values || [];
+    if (rows.length < 2) return [];
+    const headers = rows[0].map(h => String(h||'').trim());
+    return rows.slice(1).map(row => {
+      const obj = {};
+      headers.forEach((h, i) => { if (h) obj[h] = row[i]; });
+      return obj;
+    });
   }
 
   // ──── Config tab (key/value, user-editable in Sheet) ──────────────────────
@@ -752,8 +800,21 @@
 
   function pad(n){ return String(n).padStart(2,'0'); }
   function dateStr(d){ return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`; }
-  function todayStr(){ return dateStr(new Date()); }
-  function tomorrowStr(){ const d = new Date(); d.setDate(d.getDate()+1); return dateStr(d); }
+  // 4am cutoff (configurable in Sheet via day_cutoff_hour). Working past midnight
+  // counts as the previous day until the cutoff hour.
+  function todayStr(){
+    const d = new Date();
+    const cutoff = parseInt(appConfig.day_cutoff_hour, 10);
+    if (Number.isFinite(cutoff) && d.getHours() < cutoff) d.setDate(d.getDate() - 1);
+    return dateStr(d);
+  }
+  function tomorrowStr(){
+    const d = new Date();
+    const cutoff = parseInt(appConfig.day_cutoff_hour, 10);
+    if (Number.isFinite(cutoff) && d.getHours() < cutoff) d.setDate(d.getDate() - 1);
+    d.setDate(d.getDate()+1);
+    return dateStr(d);
+  }
   function fmtDate(d){ return d.toLocaleDateString(undefined, { weekday:'short', month:'short', day:'numeric' }); }
   function fmtDateLong(d){ return d.toLocaleDateString(undefined, { month:'long', day:'numeric' }); }
   function mondayOf(d){
@@ -869,6 +930,57 @@
   function updateBests(){
     const cur = { habit1:calcStreak('habit1'), habit2:calcStreak('habit2'), habit3:calcStreak('habit3'), perfect:calcPerfectStreak() };
     for (const k of Object.keys(cur)) if (cur[k] > (state.bestStreaks[k]||0)) state.bestStreaks[k] = cur[k];
+  }
+
+  // Recompute bestStreaks from scratch over ALL days. Used after Sheet hydrate
+  // to restore streaks on a fresh device. Calendar-aware: gaps reset runs.
+  function recomputeBestStreaks(){
+    const dates = Object.keys(state.days).sort();
+    const best = { habit1:0, habit2:0, habit3:0, perfect:0 };
+    if (!dates.length){ state.bestStreaks = best; return; }
+    const cur = { habit1:0, habit2:0, habit3:0, perfect:0 };
+    const start = new Date(dates[0]);
+    const end = new Date(dates[dates.length-1]);
+    for (let d = new Date(start); d <= end; d.setDate(d.getDate()+1)){
+      const ds = dateStr(d), day = state.days[ds];
+      if (!day){ cur.habit1 = cur.habit2 = cur.habit3 = cur.perfect = 0; continue; }
+      const dn = isHabitDone(day);
+      for (const h of HABITS){
+        if (dn[h]){ cur[h]++; if (cur[h] > best[h]) best[h] = cur[h]; }
+        else cur[h] = 0;
+      }
+      if (HABITS.every(h => dn[h])){ cur.perfect++; if (cur.perfect > best.perfect) best.perfect = cur.perfect; }
+      else cur.perfect = 0;
+    }
+    state.bestStreaks = best;
+  }
+
+  // Sheet -> state.days (Sheet wins). Used on sign-in / cross-device restore.
+  async function hydrateHabitsFromSheet(token, sheetId){
+    let rows;
+    try { rows = await readHabitsTab(token, sheetId); }
+    catch(e){ console.error('hydrateHabitsFromSheet failed', e); return; }
+    if (!rows.length) return;
+    for (const row of rows){
+      const ds = String(row.date || '').trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(ds)) continue;
+      const day = state.days[ds] || defaultDay(state.rechargeTarget);
+      day.mitSet = parseBool(row.habit1_done);
+      day.deepWork = parseBool(row.deep_work);
+      day.shutdownReflect = parseBool(row.habit3_done);
+      day.recharge = day.recharge || {J:false,F:false,E:false,M:false};
+      day.recharge.J = parseBool(row.recharge_j);
+      day.recharge.F = parseBool(row.recharge_f);
+      day.recharge.E = parseBool(row.recharge_e);
+      day.recharge.M = parseBool(row.recharge_m);
+      if (row.mit_text !== undefined) day.mit = String(row.mit_text || '');
+      if (row.reflection !== undefined) day.reflection = String(row.reflection || '');
+      if (row.tags !== undefined){
+        day.reflectionTags = String(row.tags||'').split(',').map(s=>s.trim()).filter(Boolean);
+      }
+      state.days[ds] = day;
+    }
+    saveState();
   }
 
   function findStreakRuns(){
@@ -1502,32 +1614,57 @@
       catch(e){ console.error('header init failed (Sheet still saved):', e); }
     } catch(e){
       console.error('sheet creation failed', e);
-      $('sheet-link').style.display = 'none';
-      $('sheet-link-pending').style.display = 'inline';
-      $('sheet-link-pending').textContent = 'Google Sheets (error — see console; check OAuth scopes)';
+      // Recovery: ask user to paste their existing Sheet URL
+      promptForSheetUrl();
     }
   }
 
-  async function hydrateConfigFromSheet(){
+  // If Drive search fails (e.g. drive.file scope not granted) AND no sheetId
+  // saved, give the user a manual escape hatch.
+  function promptForSheetUrl(){
+    const url = window.prompt(
+      "Couldn't find or create your Habit Tracker Sheet automatically.\n\n" +
+      "If you already have one, paste its URL here. Otherwise click Cancel and check OAuth scopes.",
+      ''
+    );
+    if (!url) {
+      $('sheet-link').style.display = 'none';
+      $('sheet-link-pending').style.display = 'inline';
+      $('sheet-link-pending').textContent = 'Google Sheets (auto-create failed — see console)';
+      return;
+    }
+    const m = url.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+    if (!m) { alert('That doesn\'t look like a Google Sheets URL.'); return; }
+    setConfig({ sheetId: m[1], sheetUrl: url.split('?')[0] });
+    window.location.reload();
+  }
+
+  async function hydrateFromSheet(){
     const cfg = getConfig();
     if (!cfg.sheetId || !cfg.accessToken) return;
     if (Date.now() > (cfg.accessTokenExp||0)) return;
     try {
+      // 1. Config (controls reflection_tags, day_cutoff_hour, etc.)
       appConfig = await readConfig(cfg.accessToken, cfg.sheetId);
-      // Override session-mutable state.tags with Sheet-driven list (CSV)
       const sheetTags = (appConfig.reflection_tags||'')
         .split(',').map(s => s.trim()).filter(Boolean);
       if (sheetTags.length > 0) state.tags = sheetTags;
+      // 2. Habits rows -> state.days (Sheet is canonical for history)
+      await hydrateHabitsFromSheet(cfg.accessToken, cfg.sheetId);
+      // 3. Recompute streaks from rebuilt rows
+      recomputeBestStreaks();
+      // 4. Re-bind today now that cutoff hour and rows are in
+      today = getDay(todayStr());
+      saveState();
       render();
-    } catch(e){ console.error('hydrateConfigFromSheet failed', e); }
+    } catch(e){ console.error('hydrateFromSheet failed', e); }
   }
 
   if (checkAuth()) {
     render();
     (async () => {
       await ensureSheetExists();
-      await hydrateConfigFromSheet();
-      // Silently sync yesterday if it was missed
+      await hydrateFromSheet();
       const yd = daysAgoStr(1);
       if (state.days[yd] && !state.sheetsSynced[yd]) syncDayToSheets(yd);
     })();
