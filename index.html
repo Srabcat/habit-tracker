@@ -556,16 +556,13 @@
 </details>
 
 <div class="footer">
-  Data lives in this browser + Google Sheets.
+  Data lives in this browser + <a id="sheet-link" href="#" target="_blank" rel="noopener" style="color:#4f46e5; text-decoration:underline;">Google Sheet</a><span id="sheet-link-pending" style="display:none; color:#94a3b8;">Google Sheets <em>(syncs on next change)</em></span>.
   <button id="export-btn">Export backup</button>·
   <button id="import-btn">Import backup</button>·
   <button id="reset-btn">Reset everything</button>·
   <button id="signout-btn">Sign out</button>
   <div class="last-export">Last backup: <span id="last-backup-meta">never</span></div>
   <div id="sync-status" style="font-size:11px; margin-top:4px;"></div>
-  <div id="sheet-link-wrap" style="display:none; margin-top:4px;">
-    <a id="sheet-link" href="#" target="_blank" rel="noopener" style="font-size:11px; color:#94a3b8; text-decoration:none;">📊 Open my Sheet</a>
-  </div>
   <input type="file" id="import-file" accept=".json" style="display:none;">
 </div>
 
@@ -1405,11 +1402,13 @@
 
   if (checkAuth()) {
     render();
-    // Show Sheet link if configured
+    // Show Sheet link if configured, else show pending placeholder
     const cfg = getConfig();
     if (cfg.sheetUrl) {
       $('sheet-link').href = cfg.sheetUrl;
-      $('sheet-link-wrap').style.display = 'block';
+    } else {
+      $('sheet-link').style.display = 'none';
+      $('sheet-link-pending').style.display = 'inline';
     }
     // Silently sync yesterday if it was missed
     const yd = daysAgoStr(1);
